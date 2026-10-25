@@ -2,6 +2,9 @@
 //!
 //! Used when the `yazi-png` feature is enabled instead of the `png` crate.
 
+// Kept as swash wrote it; lints are allowed rather than rewriting ported code.
+#![allow(clippy::get_first, clippy::manual_div_ceil)]
+
 use alloc::vec::Vec;
 
 /// PNG magic bytes.
