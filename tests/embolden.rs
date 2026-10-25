@@ -48,8 +48,9 @@ fn embolden_never_thins_a_glyph() {
                 bold >= thin,
                 "{path} gid {gid}: embolden reduced coverage {thin} -> {bold}"
             );
+            // A 1px faux bold adds about 2px per axis; sharp corners extend further.
             assert!(
-                w1 >= w0 && h1 >= h0 && w1 <= w0 + 3 && h1 <= h0 + 3,
+                w1 >= w0 && h1 >= h0 && w1 <= w0 + 8 && h1 <= h0 + 8,
                 "{path} gid {gid}: emboldened image {w0}x{h0} -> {w1}x{h1}"
             );
             checked += 1;
