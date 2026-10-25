@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets
+      - run: cargo clippy --all-targets --no-default-features --features std,yazi-png
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps
+
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: png
+            args: ""
+          - name: yazi-png
+            args: --no-default-features --features std,yazi-png
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install golden fonts
+        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core fonts-liberation fonts-jetbrains-mono fonts-lmodern
+      - run: cargo test --release ${{ matrix.args }}
+
+  no-std:
+    name: no_std (thumbv7em-none-eabihf)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --target thumbv7em-none-eabihf --no-default-features --features libm
+      - run: cargo build --target thumbv7em-none-eabihf --no-default-features --features libm,yazi-png
