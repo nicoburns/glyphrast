@@ -36,7 +36,7 @@ let image = Render::new(&[
 
 Everything else, including swash's hinting configuration and its bitmap and COLRv0 compositing,
 reproduces swash's output byte for byte (see `tests/golden.rs`, which compares against swash
-built on the same skrifa).
+0.2.10 from crates.io; set `NOTO_COLOR_EMOJI=/path/to/NotoColorEmoji.ttf` to include that font).
 
 ## Features
 

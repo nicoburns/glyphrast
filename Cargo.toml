@@ -26,4 +26,4 @@ yazi = { version = "0.2.1", optional = true, default-features = false }
 core_maths = { version = "0.1.1", optional = true }
 
 [dev-dependencies]
-swash = { path = "/home/ubuntu/work/swash-skrifa49", default-features = true }
+swash = { version = "0.2.10", default-features = true }
