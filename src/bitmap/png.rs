@@ -423,7 +423,10 @@ fn normalize(
     match depth {
         16 => {
             if trunc_16 {
-                for (i, d) in dest.iter_mut().enumerate() {
+                // `dest` is a full row of 16-bit samples; only the first
+                // `source.len() / 2` bytes receive the truncated samples.
+                let samples = source.len() / 2;
+                for (i, d) in dest.get_mut(..samples)?.iter_mut().enumerate() {
                     *d = source[i * 2];
                 }
             } else if IS_LITTLE_ENDIAN {
@@ -591,4 +594,64 @@ fn get_u32be(buf: &[u8], offset: usize) -> u32 {
 
 const fn chunk_name(bytes: &[u8; 4]) -> u32 {
     (bytes[0] as u32) << 24 | (bytes[1] as u32) << 16 | (bytes[2] as u32) << 8 | bytes[3] as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode;
+
+    /// Encodes `raw` samples as a PNG of the given colour type and depth.
+    fn encode(w: u32, h: u32, color: png::ColorType, depth: png::BitDepth, raw: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut encoder = png::Encoder::new(&mut out, w, h);
+        encoder.set_color(color);
+        encoder.set_depth(depth);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(raw)
+            .unwrap();
+        out
+    }
+
+    /// Decodes with the `png` crate to 8-bit RGBA, the reference for `decode`.
+    fn reference(data: &[u8]) -> Vec<u8> {
+        let mut decoder = png::Decoder::new(data);
+        decoder.set_transformations(
+            png::Transformations::normalize_to_color8() | png::Transformations::ALPHA,
+        );
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        let bytes = &buf[..info.buffer_size()];
+        match info.color_type {
+            png::ColorType::Rgba => bytes.to_vec(),
+            png::ColorType::GrayscaleAlpha => bytes
+                .chunks(2)
+                .flat_map(|p| [p[0], p[0], p[0], p[1]])
+                .collect(),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sixteen_bit_depth_matches_the_png_crate() {
+        let (w, h) = (5u32, 3u32);
+        for (color, channels) in [
+            (png::ColorType::Grayscale, 1usize),
+            (png::ColorType::GrayscaleAlpha, 2),
+            (png::ColorType::Rgb, 3),
+            (png::ColorType::Rgba, 4),
+        ] {
+            let raw: Vec<u8> = (0..(w * h) as usize * channels * 2)
+                .map(|i| (i * 37 % 251) as u8)
+                .collect();
+            let data = encode(w, h, color, png::BitDepth::Sixteen, &raw);
+            let mut target = vec![0u8; (w * h * 4) as usize];
+            let mut scratch = Vec::new();
+            let (dw, dh, _) = decode(&data, &mut scratch, &mut target).unwrap();
+            assert_eq!((dw, dh), (w, h));
+            assert_eq!(target, reference(&data), "{color:?}");
+        }
+    }
 }
