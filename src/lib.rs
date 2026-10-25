@@ -563,15 +563,18 @@ impl<'a> Scaler<'a> {
                 return None;
             }
             if !bitmap::resize(
-                &state.scratch0,
-                bitmap.width,
-                bitmap.height,
+                bitmap::Raster {
+                    data: &state.scratch0,
+                    width: bitmap.width,
+                    height: bitmap.height,
+                },
                 bitmap.format.channels(),
-                &mut image.data,
-                w,
-                h,
-                bitmap::Filter::Mitchell,
-                Some(&mut state.scratch1),
+                bitmap::RasterMut {
+                    data: &mut image.data,
+                    width: w,
+                    height: h,
+                },
+                &mut state.scratch1,
             ) {
                 return None;
             }

@@ -174,15 +174,19 @@ impl<'a> Render<'a> {
                                 .and_then(|i| palette.as_ref().map(|p| p.color(i)))
                                 .unwrap_or(self.foreground);
                             bitmap::blit(
-                                &scratch[..],
-                                placement.width,
-                                placement.height,
+                                bitmap::Raster {
+                                    data: &scratch[..],
+                                    width: placement.width,
+                                    height: placement.height,
+                                },
                                 placement.left.wrapping_sub(base_x),
                                 (base_h as i32 + base_y).wrapping_sub(placement.top),
                                 color,
-                                &mut image.data,
-                                base_w,
-                                base_h,
+                                bitmap::RasterMut {
+                                    data: &mut image.data,
+                                    width: base_w,
+                                    height: base_h,
+                                },
                             );
                         }
                         if ok {

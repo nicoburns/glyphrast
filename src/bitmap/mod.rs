@@ -1,7 +1,5 @@
 //! Bitmap decoding and scaling, ported from swash 0.2.10 (`src/scale/bitmap/mod.rs`).
 
-#![allow(dead_code, clippy::too_many_arguments, clippy::explicit_counter_loop)]
-
 use alloc::vec::Vec;
 #[cfg(feature = "libm")]
 use core_maths::CoreFloat;
@@ -64,17 +62,33 @@ pub fn decode_png(_data: &[u8], _scratch: &mut Vec<u8>, _target: &mut [u8]) -> O
     None
 }
 
-pub fn blit(
-    mask: &[u8],
-    mask_width: u32,
-    mask_height: u32,
-    x: i32,
-    y: i32,
-    color: [u8; 4],
-    target: &mut [u8],
-    target_width: u32,
-    target_height: u32,
-) {
+/// A borrowed, tightly packed pixel buffer.
+#[derive(Copy, Clone)]
+pub struct Raster<'a> {
+    pub data: &'a [u8],
+    pub width: u32,
+    pub height: u32,
+}
+
+/// A mutably borrowed, tightly packed pixel buffer.
+pub struct RasterMut<'a> {
+    pub data: &'a mut [u8],
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Composites an 8-bit mask, tinted with `color`, onto an RGBA target at (`x`, `y`).
+pub fn blit(mask: Raster<'_>, x: i32, y: i32, color: [u8; 4], target: RasterMut<'_>) {
+    let Raster {
+        data: mask,
+        width: mask_width,
+        height: mask_height,
+    } = mask;
+    let RasterMut {
+        data: target,
+        width: target_width,
+        height: target_height,
+    } = target;
     if mask_width == 0 || mask_height == 0 || target_width == 0 || target_height == 0 {
         return;
     }
@@ -98,11 +112,9 @@ pub fn blit(
     let source_rows = source_x..source_end_x;
     let dest_pitch = target_width as usize * 4;
     let color_a = color[3] as u32;
-    let mut dy = dest_y;
-    for sy in source_columns {
+    for (dy, sy) in (dest_y..).zip(source_columns) {
         let src_row = &mask[sy * mask_width as usize..];
         let dst_row = &mut target[dy * dest_pitch..];
-        dy += 1;
         let mut dx = dest_x * 4;
         for sx in source_rows.clone() {
             let a = (src_row[sx] as u32 * color_a) >> 8;
@@ -126,132 +138,34 @@ pub fn blit(
     }
 }
 
-#[derive(Copy, Clone, PartialEq)]
-pub enum Filter {
-    Nearest,
-    Bilinear,
-    Bicubic,
-    Mitchell,
-    Lanczos3,
-    Gaussian,
-}
-
+/// Resamples `image` with `channels` bytes per pixel into `target` with a
+/// Mitchell filter. `scratch` holds the intermediate horizontally resampled rows.
 pub fn resize(
-    image: &[u8],
-    width: u32,
-    height: u32,
+    image: Raster<'_>,
     channels: u32,
-    target: &mut [u8],
-    target_width: u32,
-    target_height: u32,
-    filter: Filter,
-    scratch: Option<&mut Vec<u8>>,
+    target: RasterMut<'_>,
+    scratch: &mut Vec<u8>,
 ) -> bool {
-    if target_width == 0 || target_height == 0 {
+    if target.width == 0 || target.height == 0 {
         return true;
     }
-    let mut tmp = Vec::new();
-    let scratch = if let Some(scratch) = scratch {
-        scratch
-    } else {
-        &mut tmp
-    };
-    let image_size = (width * height * channels) as usize;
-    if image.len() < image_size {
+    let image_size = (image.width * image.height * channels) as usize;
+    if image.data.len() < image_size {
         return false;
     }
-    let target_size = (target_width * target_height * channels) as usize;
-    if target.len() < target_size {
+    let target_size = (target.width * target.height * channels) as usize;
+    if target.data.len() < target_size {
         return false;
     }
-    let scratch_size = (target_width * height * channels) as usize;
+    let scratch_size = (target.width * image.height * channels) as usize;
     scratch.resize(scratch_size, 0);
-    use Filter::*;
-    match filter {
-        Nearest => resample(
-            image,
-            width,
-            height,
-            channels,
-            target,
-            target_width,
-            target_height,
-            scratch,
-            0.,
-            &nearest,
-        ),
-        Bilinear => resample(
-            image,
-            width,
-            height,
-            channels,
-            target,
-            target_width,
-            target_height,
-            scratch,
-            1.,
-            &bilinear,
-        ),
-        Bicubic => resample(
-            image,
-            width,
-            height,
-            channels,
-            target,
-            target_width,
-            target_height,
-            scratch,
-            2.,
-            &bicubic,
-        ),
-        Mitchell => resample(
-            image,
-            width,
-            height,
-            channels,
-            target,
-            target_width,
-            target_height,
-            scratch,
-            2.,
-            &mitchell,
-        ),
-        Lanczos3 => resample(
-            image,
-            width,
-            height,
-            channels,
-            target,
-            target_width,
-            target_height,
-            scratch,
-            3.,
-            &lanczos3,
-        ),
-        Gaussian => resample(
-            image,
-            width,
-            height,
-            channels,
-            target,
-            target_width,
-            target_height,
-            scratch,
-            3.,
-            &|x| gaussian(x, 0.5),
-        ),
-    }
+    resample(image, channels, target, scratch, 2., &mitchell)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resample<Filter>(
-    image: &[u8],
-    width: u32,
-    height: u32,
+    image: Raster<'_>,
     channels: u32,
-    target: &mut [u8],
-    target_width: u32,
-    target_height: u32,
+    target: RasterMut<'_>,
     scratch: &mut [u8],
     support: f32,
     filter: &Filter,
@@ -259,6 +173,16 @@ fn resample<Filter>(
 where
     Filter: Fn(f32) -> f32,
 {
+    let Raster {
+        data: image,
+        width,
+        height,
+    } = image;
+    let RasterMut {
+        data: target,
+        width: target_width,
+        height: target_height,
+    } = target;
     let tmp_width = target_width;
     let tmp_height = height;
     let s = 1. / 255.;
@@ -398,49 +322,6 @@ fn sample_dir<Input, Output, Filter>(
     }
 }
 
-fn sinc(t: f32) -> f32 {
-    let a = t * core::f32::consts::PI;
-    if t == 0. {
-        1.
-    } else {
-        a.sin() / a
-    }
-}
-
-fn lanczos3(x: f32) -> f32 {
-    if x.abs() < 3. {
-        (sinc(x) * sinc(x / 3.)).abs()
-    } else {
-        0.
-    }
-}
-
-fn bilinear(x: f32) -> f32 {
-    let x = x.abs();
-    if x < 1. {
-        1. - x
-    } else {
-        0.
-    }
-}
-
-fn bicubic(x: f32) -> f32 {
-    let a = x.abs();
-    let b = 0.;
-    let c = 0.5;
-    let k = if a < 1. {
-        (12. - 9. * b - 6. * c) * a.powi(3) + (-18. + 12. * b + 6. * c) * a.powi(2) + (6. - 2. * b)
-    } else if a < 2. {
-        (-b - 6. * c) * a.powi(3)
-            + (6. * b + 30. * c) * a.powi(2)
-            + (-12. * b - 48. * c) * a
-            + (8. * b + 24. * c)
-    } else {
-        0.
-    };
-    (k / 6.).abs()
-}
-
 fn mitchell(x: f32) -> f32 {
     let x = x.abs();
     if x < 1. {
@@ -450,12 +331,4 @@ fn mitchell(x: f32) -> f32 {
     } else {
         0.
     }
-}
-
-fn nearest(_x: f32) -> f32 {
-    1.
-}
-
-fn gaussian(x: f32, r: f32) -> f32 {
-    ((2. * core::f32::consts::PI).sqrt() * r).recip() * (-x.powi(2) / (2. * r.powi(2))).exp()
 }

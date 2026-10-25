@@ -2,9 +2,6 @@
 //!
 //! Used when the `yazi-png` feature is enabled instead of the `png` crate.
 
-// Kept as swash wrote it; lints are allowed rather than rewriting ported code.
-#![allow(clippy::get_first, clippy::manual_div_ceil)]
-
 use alloc::vec::Vec;
 
 /// PNG magic bytes.
@@ -13,24 +10,10 @@ pub const SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 /// Errors that can occur during decoding.
 #[derive(Debug)]
 pub enum DecodeError {
-    /// The file format was not supported.
-    UnsupportedFileFormat,
-    /// Conversion into the requested format failed.
-    ConversionFailed,
-    /// Invalid signature in an image.
-    InvalidSignature,
-    /// The file contains a pixel format this is not supported.
-    UnsupportedPixelFormat,
-    /// The file enables a feature that is not supported.
-    UnsupportedFeature,
     /// Some size limit was exceeded.
     LimitExceeded,
-    /// Some index into the image was out of bounds.
-    IndexOutOfBounds,
     /// Some portion of the file was corrupt.
     CorruptData,
-    /// An "end of file" was reached prematurely.
-    UnexpectedEof,
 }
 
 impl From<yazi::Error> for DecodeError {
@@ -159,13 +142,10 @@ pub fn decode(
 
 struct State<'a> {
     header: Header,
-    data: &'a [u8],
     palette: &'a [u8],
     trans: &'a [u8],
     gamma: Option<f32>,
-    effective_depth: u8,
     bpp: usize,
-    channels: usize,
     pitch: usize,
     extra_bytes: usize,
     bwidth: usize,
@@ -179,13 +159,10 @@ impl<'a> State<'a> {
         let header = Header::decode(data).ok_or(DecodeError::CorruptData)?;
         let mut this = Self {
             header,
-            data,
             palette: &[],
             trans: &[],
             gamma: None,
-            effective_depth: header.depth,
             bpp: 0,
-            channels: 0,
             pitch: 0,
             extra_bytes: 0,
             bwidth: 0,
@@ -208,8 +185,8 @@ impl<'a> State<'a> {
         };
         this.has_alpha = has_alpha;
         this.bpp = this.header.depth as usize * channels;
-        this.pitch = (w * this.bpp + 7) / 8;
-        this.bwidth = (this.bpp + 7) / 8;
+        this.pitch = (w * this.bpp).div_ceil(8);
+        this.bwidth = this.bpp.div_ceil(8);
         this.extra_bytes = this.pitch * 2 + w * 8;
         decomp.clear();
         decomp.reserve(this.extra_bytes + (this.pitch + 1) * h);
@@ -292,11 +269,11 @@ fn decode_data<E: Emit>(
         let mut offset = 0;
         loop {
             let cols = match pass {
-                0 => (w + 7) / 8,
+                0 => w.div_ceil(8),
                 1 => (w + 3) / 8,
-                2 => (w + 3) / 4,
+                2 => w.div_ceil(4),
                 3 => (w + 1) / 4,
-                4 => (w + 1) / 2,
+                4 => w.div_ceil(2),
                 5 => w / 2,
                 6 => w,
                 _ => return None,
@@ -309,7 +286,7 @@ fn decode_data<E: Emit>(
             let inc = COL_INCREMENT[pass] as usize;
             let row_inc = ROW_INCREMENT[pass] as usize;
             while y < h {
-                let pitch = (cols * bpp + 7) / 8;
+                let pitch = (cols * bpp).div_ceil(8);
                 let end = offset + pitch + 1;
                 let source = decomp.get(offset..end)?;
                 offset = end;
@@ -322,10 +299,32 @@ fn decode_data<E: Emit>(
                     bwidth,
                 )?;
                 if depth == 8 {
-                    E::emit(state, line, target, start, y, w, inc, cols)?;
+                    E::emit(
+                        state,
+                        line,
+                        target,
+                        Span {
+                            x: start,
+                            y,
+                            width: w,
+                            inc,
+                            len: cols,
+                        },
+                    )?;
                 } else {
                     normalize(line, out_line, depth, has_palette, cols, trunc_16)?;
-                    E::emit(state, out_line, target, start, y, w, inc, cols)?;
+                    E::emit(
+                        state,
+                        out_line,
+                        target,
+                        Span {
+                            x: start,
+                            y,
+                            width: w,
+                            inc,
+                            len: cols,
+                        },
+                    )?;
                 }
                 core::mem::swap(&mut prev_line, &mut line);
                 y += row_inc;
@@ -344,9 +343,20 @@ fn decode_data<E: Emit>(
             let offset = y * (pitch + 1);
             let end = offset + pitch + 1;
             let source = decomp.get(offset..end)?;
-            let ty = *source.get(0)?;
+            let ty = *source.first()?;
             defilter(ty, source.get(1..)?, line, prev_line, bwidth)?;
-            E::emit(state, line, target, 0, y, w, 1, w)?;
+            E::emit(
+                state,
+                line,
+                target,
+                Span {
+                    x: 0,
+                    y,
+                    width: w,
+                    inc: 1,
+                    len: w,
+                },
+            )?;
             core::mem::swap(&mut prev_line, &mut line);
         }
     } else {
@@ -354,10 +364,21 @@ fn decode_data<E: Emit>(
             let offset = y * (pitch + 1);
             let end = offset + pitch + 1;
             let source = decomp.get(offset..end)?;
-            let ty = *source.get(0)?;
+            let ty = *source.first()?;
             defilter(ty, source.get(1..)?, line, prev_line, bwidth)?;
             normalize(line, out_line, depth, has_palette, w, trunc_16)?;
-            E::emit(state, out_line, target, 0, y, w, 1, w)?;
+            E::emit(
+                state,
+                out_line,
+                target,
+                Span {
+                    x: 0,
+                    y,
+                    width: w,
+                    inc: 1,
+                    len: w,
+                },
+            )?;
             core::mem::swap(&mut prev_line, &mut line);
         }
     }
@@ -461,33 +482,32 @@ fn normalize(
     Some(())
 }
 
+/// Where a decoded row (or interlace pass of a row) lands in the image.
+#[derive(Copy, Clone)]
+struct Span {
+    x: usize,
+    y: usize,
+    width: usize,
+    inc: usize,
+    len: usize,
+}
+
 trait Emit {
-    fn emit(
-        state: &State,
-        source: &[u8],
-        image: &mut [u8],
-        x: usize,
-        y: usize,
-        width: usize,
-        inc: usize,
-        len: usize,
-    ) -> Option<()>;
+    fn emit(state: &State, source: &[u8], image: &mut [u8], span: Span) -> Option<()>;
 }
 
 struct EmitRgba8;
 
 impl Emit for EmitRgba8 {
-    fn emit(
-        state: &State,
-        source: &[u8],
-        image: &mut [u8],
-        x: usize,
-        y: usize,
-        width: usize,
-        inc: usize,
-        len: usize,
-    ) -> Option<()> {
+    fn emit(state: &State, source: &[u8], image: &mut [u8], span: Span) -> Option<()> {
         use ColorType::*;
+        let Span {
+            x,
+            y,
+            width,
+            inc,
+            len,
+        } = span;
         let src = source;
         let mut out = y * width * 4 + x * 4;
         let mut i = 0;
