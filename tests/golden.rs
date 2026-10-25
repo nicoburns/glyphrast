@@ -105,6 +105,33 @@ fn describe(a: &Option<swash::scale::image::Image>, b: &Option<Image>) -> String
     }
 }
 
+/// True if every pixel of `inner` (an RGBA image on the baseline grid) has the
+/// same value at the same absolute position in `outer`.
+fn contains_color_image(outer: &Image, inner: &swash::scale::image::Image) -> bool {
+    let (op, ip) = (&outer.placement, &inner.placement);
+    for y in 0..ip.height as i32 {
+        for x in 0..ip.width as i32 {
+            // y-up placements: `top` is the row above the baseline.
+            let abs_x = ip.left + x;
+            let abs_y = ip.top - y;
+            let ox = abs_x - op.left;
+            let oy = op.top - abs_y;
+            let inner_px = &inner.data[((y * ip.width as i32 + x) * 4) as usize..][..4];
+            if ox < 0 || oy < 0 || ox >= op.width as i32 || oy >= op.height as i32 {
+                if inner_px != [0, 0, 0, 0] {
+                    return false;
+                }
+                continue;
+            }
+            let outer_px = &outer.data[((oy * op.width as i32 + ox) * 4) as usize..][..4];
+            if inner_px != outer_px {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn glyph_ids(num_glyphs: u32, max: u32) -> impl Iterator<Item = u32> {
     let step = (num_glyphs / max).max(1);
     (0..num_glyphs).step_by(step as usize)
@@ -291,13 +318,24 @@ fn color_outlines_match_swash() {
                             .offset(offset)
                             .default_color([10, 20, 30, 200])
                             .render(&mut new, gid);
-                        let same = same_image(&a, &b)
-                            && match (&a, &b) {
-                                (Some(a), Some(b)) => {
-                                    format!("{:?}", a.source) == format!("{:?}", b.source)
-                                }
-                                _ => true,
-                            };
+                        // The image bounds differ from swash, which cropped color glyphs
+                        // (dfrg/swash#117), so compare the pixels swash did produce at
+                        // their absolute positions inside the new image.
+                        let same = match (&a, &b) {
+                            (Some(a), Some(b)) => {
+                                let color =
+                                    matches!(a.content, swash::scale::image::Content::Color);
+                                format!("{:?}", a.source) == format!("{:?}", b.source)
+                                    && format!("{:?}", a.content) == format!("{:?}", b.content)
+                                    && if color {
+                                        contains_color_image(b, a)
+                                    } else {
+                                        same_image(&Some(a.clone()), &Some(b.clone()))
+                                    }
+                            }
+                            (None, None) => true,
+                            _ => false,
+                        };
                         report.check(|| format!("Render color gid {gid} size {size} hint {hint} palette {palette} {offset:?}: {}", describe(&a, &b)), same);
                     }
                 }

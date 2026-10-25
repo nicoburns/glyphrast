@@ -135,19 +135,22 @@ impl<'a> Render<'a> {
                         }
                         let palette = Palette::get(font, *palette_index);
 
+                        // The image covers the pixel-aligned bounds of all layers at
+                        // the requested offset, matching how each layer's mask is
+                        // placed below.
                         let total_bounds = outline.bounds();
-
-                        // need to take offset into account when placing glyph
                         let base_x = (total_bounds.min.x + self.offset.x).floor() as i32;
-                        let base_y = (total_bounds.min.y + self.offset.y).ceil() as i32;
-                        let base_w = total_bounds.width().ceil() as u32;
-                        let base_h = total_bounds.height().ceil() as u32;
+                        let base_y = (total_bounds.min.y + self.offset.y).floor() as i32;
+                        let max_x = (total_bounds.max.x + self.offset.x).ceil() as i32;
+                        let max_y = (total_bounds.max.y + self.offset.y).ceil() as i32;
+                        let base_w = max_x.wrapping_sub(base_x).max(0) as u32;
+                        let base_h = max_y.wrapping_sub(base_y).max(0) as u32;
 
                         image.data.resize((base_w * base_h * 4) as usize, 0);
                         image.placement.left = base_x;
                         image.placement.top = base_h as i32 + base_y;
-                        image.placement.width = total_bounds.width().ceil() as u32;
-                        image.placement.height = total_bounds.height().ceil() as u32;
+                        image.placement.width = base_w;
+                        image.placement.height = base_h;
 
                         let mut ok = true;
                         for i in 0..outline.len() {
