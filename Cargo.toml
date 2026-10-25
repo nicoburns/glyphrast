@@ -1,0 +1,29 @@
+[package]
+name = "glyphrast"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Glyph scaling and rasterization on top of read-fonts, skrifa and zeno."
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/nicoburns/glyphrast"
+keywords = ["font", "glyph", "rasterization", "text"]
+categories = ["graphics", "text-processing"]
+
+[features]
+default = ["std", "png"]
+std = ["read-fonts/std", "skrifa/std", "zeno/std", "yazi?/std"]
+libm = ["dep:core_maths", "read-fonts/libm", "skrifa/libm", "zeno/libm"]
+png = ["dep:png", "std"]
+yazi-png = ["dep:yazi"]
+
+[dependencies]
+read-fonts = { version = "0.46", default-features = false }
+skrifa = { version = "0.49", default-features = false }
+zeno = { version = "0.3.3", default-features = false, features = ["eval"] }
+smallvec = "1"
+png = { version = "0.17", optional = true }
+yazi = { version = "0.2.1", optional = true, default-features = false }
+core_maths = { version = "0.1.1", optional = true }
+
+[dev-dependencies]
+swash = { path = "/home/ubuntu/work/swash-skrifa49", default-features = true }
