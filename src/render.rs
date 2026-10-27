@@ -2,10 +2,13 @@
 
 use crate::bitmap;
 use crate::color::Palette;
+use crate::colr1;
 use crate::image::{Content, Image};
 use crate::{GlyphId, Scaler, Source};
 #[cfg(feature = "libm")]
 use core_maths::CoreFloat;
+use read_fonts::model::glyph::color::ColorGlyphVersion;
+use read_fonts::types::GlyphId as RawGlyphId;
 use zeno::{Format, Mask, Origin, Point, Style, Transform, Vector};
 
 /// Builder type for rendering a glyph into an image.
@@ -122,6 +125,32 @@ impl<'a> Render<'a> {
                 Source::ColorOutline(palette_index) => {
                     if !scaler.has_color_outlines() {
                         continue;
+                    }
+                    let font = scaler.font();
+                    if let Some(glyph) = font
+                        .color_glyphs()
+                        .get_with_version(RawGlyphId::new(glyph_id), ColorGlyphVersion::ColrV1)
+                    {
+                        let state = &mut *scaler.state;
+                        let buffers = colr1::Buffers {
+                            outline: &mut state.outline,
+                            draw_memory: &mut state.draw_memory,
+                            rcx: &mut state.rcx,
+                            scratch: &mut state.colr1,
+                        };
+                        let palette = Palette::get(font, *palette_index);
+                        if colr1::Painter::new(scaler.scaler, buffers).render(
+                            &glyph,
+                            palette,
+                            self.foreground,
+                            self.offset,
+                            self.transform,
+                            image,
+                        ) {
+                            image.source = Source::ColorOutline(*palette_index);
+                            image.content = Content::Color;
+                            return true;
+                        }
                     }
                     scaler.state.outline.clear();
                     if scaler.scale_color_outline_impl(glyph_id) {
