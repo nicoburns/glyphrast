@@ -50,6 +50,7 @@ pub mod outline;
 
 mod bitmap;
 mod color;
+mod colr1;
 mod render;
 mod scaler_cache;
 mod strike;
@@ -206,6 +207,7 @@ struct State {
     layers: Vec<color::Layer>,
     outline: Outline,
     rcx: zeno::Scratch,
+    colr1: colr1::Scratch,
 }
 
 impl RasterContext {
@@ -226,6 +228,7 @@ impl RasterContext {
                 layers: Vec::new(),
                 outline: Outline::new(),
                 rcx: zeno::Scratch::new(),
+                colr1: colr1::Scratch::default(),
             },
         }
     }
@@ -370,7 +373,8 @@ impl<'a> Scaler<'a> {
         color::has_color_outlines(self.font())
     }
 
-    /// Scales a color outline for the specified glyph into the provided outline.
+    /// Scales the COLRv0 layers of the specified glyph into the provided
+    /// outline. COLRv1 paint graphs render only through [`Render`].
     pub fn scale_color_outline_into(&mut self, glyph_id: GlyphId, outline: &mut Outline) -> bool {
         outline.clear();
         if !self.has_color_outlines() {

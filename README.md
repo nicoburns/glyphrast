@@ -38,6 +38,16 @@ Everything else, including swash's hinting configuration and its bitmap and COLR
 reproduces swash's output byte for byte (see `tests/golden.rs`, which compares against swash
 0.2.10 from crates.io; set `NOTO_COLOR_EMOJI=/path/to/NotoColorEmoji.ttf` to include that font).
 
+## COLRv1
+
+`Source::ColorOutline` renders a glyph's COLRv1 paint graph when it has one, and its COLRv0
+layers otherwise. The paint callbacks from `read_fonts` drive a small software compositor:
+a stack of premultiplied RGBA layers the size of the glyph's clip box (or painted bounds),
+clip masks rasterized with zeno, solid, linear, radial and sweep brushes with the three
+extend modes evaluated per pixel, and the Porter-Duff, separable and HSL composite modes.
+Palette index `0xFFFF` takes `Render::default_color`. `Scaler::scale_color_outline` still
+returns COLRv0 layers only, since a paint graph has no outline representation.
+
 ## Features
 
 - `std` (default): use the standard library.
