@@ -11,6 +11,9 @@ pub enum Content {
     #[default]
     Mask,
     /// 32-bit RGBA subpixel mask.
+    ///
+    /// Alpha is the mean of the three channels for [`Format::Lcd`](crate::Format::Lcd)
+    /// and zero for zeno's subpixel formats.
     SubpixelMask,
     /// 32-bit RGBA bitmap.
     ///
