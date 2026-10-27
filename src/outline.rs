@@ -195,7 +195,7 @@ impl<'a> LayerMut<'a> {
     pub fn embolden(&mut self, x_strength: f32, y_strength: f32) {
         let mut point_start = 0;
         let mut pos = 0;
-        let winding = compute_winding(self.points);
+        let winding = compute_winding(self.points, self.verbs);
         for verb in self.verbs {
             match verb {
                 Verb::MoveTo | Verb::Close => {
@@ -380,22 +380,55 @@ fn embolden(points: &mut [Point], winding: u8, x_strength: f32, y_strength: f32)
     }
 }
 
-fn compute_winding(points: &[Point]) -> u8 {
-    if points.is_empty() {
-        return 0;
-    }
+/// Orientation of the outline: 1 if its contours enclose a positive signed
+/// area, 0 otherwise.
+///
+/// Each contour is closed on its own before its area is summed, so the
+/// implicit edges between the end of one contour and the start of the next do
+/// not count. Inner contours are wound the other way and subtract from the
+/// total, which leaves the orientation of the outer contours.
+fn compute_winding(points: &[Point], verbs: &[Verb]) -> u8 {
     let mut area = 0.;
-    let last = points.len() - 1;
-    let mut prev = points[last];
-    for cur in points[0..=last].iter() {
-        area += (cur.y - prev.y) * (cur.x + prev.x);
-        prev = *cur;
+    let mut point_start = 0;
+    let mut pos = 0;
+    for verb in verbs {
+        match verb {
+            Verb::MoveTo | Verb::Close => {
+                if let Some(points) = points.get(point_start..pos) {
+                    area += signed_area(points);
+                }
+                point_start = pos;
+                if *verb == Verb::MoveTo {
+                    pos += 1;
+                }
+            }
+            Verb::LineTo => pos += 1,
+            Verb::QuadTo => pos += 2,
+            Verb::CurveTo => pos += 3,
+        }
+    }
+    if let Some(points) = points.get(point_start..pos) {
+        area += signed_area(points);
     }
     if area > 0. {
         1
     } else {
         0
     }
+}
+
+/// Twice the signed area of a closed polygon through `points`.
+fn signed_area(points: &[Point]) -> f32 {
+    let Some(last) = points.last() else {
+        return 0.;
+    };
+    let mut area = 0.;
+    let mut prev = *last;
+    for cur in points {
+        area += (cur.y - prev.y) * (cur.x + prev.x);
+        prev = *cur;
+    }
+    area
 }
 
 impl read_fonts::model::glyph::outline::PathSink for Outline {

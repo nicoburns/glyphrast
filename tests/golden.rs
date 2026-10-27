@@ -205,7 +205,22 @@ fn outlines_match_swash() {
                                 )),
                             ),
                         ];
+                        // swash computes the embolden orientation over all contours as one
+                        // polygon, which is wrong for glyphs with several contours; only
+                        // single-contour glyphs are expected to match when emboldening.
+                        let contours = b
+                            .as_ref()
+                            .map(|o| {
+                                o.verbs()
+                                    .iter()
+                                    .filter(|v| **v == glyphrast::zeno::Verb::MoveTo)
+                                    .count()
+                            })
+                            .unwrap_or(0);
                         for (format, offset, embolden, transform) in variants {
+                            if embolden != 0. && contours > 1 {
+                                continue;
+                            }
                             let a = swash::scale::Render::new(&[swash::scale::Source::Outline])
                                 .format(format)
                                 .offset(offset)
