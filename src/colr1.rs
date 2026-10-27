@@ -396,16 +396,12 @@ impl<'a> Painter<'a> {
                 extend,
             } => {
                 self.resolve_stops(color_stops, stops);
-                let sweep = end_angle - start_angle;
-                if sweep == 0. {
-                    return None;
-                }
                 Shader::Gradient {
                     inverse,
                     kind: Kind::Sweep {
                         c0,
                         start: start_angle,
-                        inv_sweep: 1. / sweep,
+                        sweep: end_angle - start_angle,
                     },
                     extend,
                     stops,
@@ -552,7 +548,8 @@ enum Kind {
         c0: Point<f32>,
         /// Degrees clockwise, as read-fonts normalizes them.
         start: f32,
-        inv_sweep: f32,
+        /// Zero only with pad, which then splits the circle at `start`.
+        sweep: f32,
     },
 }
 
@@ -574,11 +571,7 @@ impl Shader<'_> {
                         ((x - p0.x) * d.x + (y - p0.y) * d.y) * inv_dd
                     }
                     Kind::Radial { c0, r0, cd, dr } => radial_t(x - c0.x, y - c0.y, r0, cd, dr)?,
-                    Kind::Sweep {
-                        c0,
-                        start,
-                        inv_sweep,
-                    } => {
+                    Kind::Sweep { c0, start, sweep } => {
                         // Counter-clockwise from +x in the font's y-up space,
                         // then into the clockwise range read-fonts uses.
                         let mut degrees = (y - c0.y).atan2(x - c0.x).to_degrees();
@@ -589,7 +582,15 @@ impl Shader<'_> {
                         if clockwise >= 360. {
                             clockwise -= 360.;
                         }
-                        (clockwise - start) * inv_sweep
+                        if sweep == 0. {
+                            if clockwise < start {
+                                0.
+                            } else {
+                                1.
+                            }
+                        } else {
+                            (clockwise - start) / sweep
+                        }
                     }
                 };
                 if !t.is_finite() {

@@ -401,3 +401,27 @@ fn every_test_glyph_renders_premultiplied_or_is_rejected() {
         assert!(render(&mut cx, &font, 32., gid).is_none(), "gid {gid}");
     }
 }
+
+#[test]
+fn sweep_with_equal_angles_and_pad_splits_the_circle() {
+    // Glyphs 181 and 187 sweep from blue to red over a zero-width sector, so
+    // pad paints one side of the start angle blue and the other red.
+    let font = load(TEST_GLYPHS);
+    let mut cx = RasterContext::new();
+    for gid in [181, 187] {
+        let image = render(&mut cx, &font, 100., gid).unwrap();
+        let mut blue = 0;
+        let mut red = 0;
+        let mut other = 0;
+        for px in image.data.chunks_exact(4) {
+            match px {
+                [0, 0, 255, 255] => blue += 1,
+                [255, 0, 0, 255] => red += 1,
+                [_, _, _, a] if *a > 0 => other += 1,
+                _ => {}
+            }
+        }
+        assert!(blue > 500 && red > 500, "gid {gid}: blue {blue}, red {red}");
+        assert!(other * 10 < blue + red, "gid {gid}: {other} mixed pixels");
+    }
+}
