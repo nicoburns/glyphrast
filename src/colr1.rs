@@ -310,14 +310,37 @@ impl<'a> Painter<'a> {
         let m = self.to_px * self.ctm() * scaled(1. / self.scale);
         let outline = &mut *self.buffers.outline;
         outline.transform(&to_zeno(m));
+        // The control points bound the outline, so zeno's own bounds pass
+        // over the flattened curves can be skipped.
         let scratch = &mut *self.buffers.scratch;
-        scratch.coverage_rect = rasterize(
-            outline.path(),
-            self.buffers.rcx,
-            &mut scratch.coverage,
-            Vector::new(-(self.x0 as f32), -(self.y0 as f32)),
-            self.height,
-        );
+        scratch.coverage.clear();
+        scratch.coverage_rect = Rect::default();
+        if outline.points().is_empty() {
+            return;
+        }
+        let bounds = outline.bounds();
+        let offset = Vector::new(-(self.x0 as f32), -(self.y0 as f32));
+        let min = (bounds.min + offset).floor();
+        let max = (bounds.max + offset).ceil();
+        if !(min.x.is_finite() && min.y.is_finite() && max.x.is_finite() && max.y.is_finite()) {
+            return;
+        }
+        let (w, h) = ((max.x - min.x) as u32, (max.y - min.y) as u32);
+        if w == 0 || h == 0 || (w as usize).saturating_mul(h as usize) > MAX_PIXELS {
+            return;
+        }
+        scratch.coverage.resize((w * h) as usize, 0);
+        Mask::with_scratch(outline.path(), self.buffers.rcx)
+            .origin(Origin::BottomLeft)
+            .size(w, h)
+            .offset(offset - min)
+            .render_into(&mut scratch.coverage[..], None);
+        scratch.coverage_rect = Rect {
+            x: min.x as i32,
+            y: self.height as i32 - (min.y as i32 + h as i32),
+            w: w as i32,
+            h: h as i32,
+        };
     }
 
     /// Pushes the coverage buffer, intersected with the current clip.
@@ -386,6 +409,7 @@ impl<'a> Painter<'a> {
             let top = (self.y0 + self.height as i32) as f32;
             for y in rect.y..rect.y + rect.h {
                 let py = top - y as f32 - 0.5;
+                let linear = shader.linear_row(x0 + rect.x as f32 + 0.5, py);
                 let row =
                     &mut layer[(y as usize * width + rect.x as usize) * 4..][..rect.w as usize * 4];
                 for (i, px) in row.chunks_exact_mut(4).enumerate() {
@@ -400,8 +424,12 @@ impl<'a> Painter<'a> {
                     match (&shader, &lut) {
                         (Shader::Solid(color), _) => src_over_u8(px, *color, c),
                         (shader, Some(lut)) => {
-                            let Some(t) = shader.t(x0 + x as f32 + 0.5, py) else {
-                                continue;
+                            let t = match linear {
+                                Some((t0, dt, extend)) => extend_t(extend, t0 + i as f32 * dt),
+                                None => match shader.t(x0 + x as f32 + 0.5, py) {
+                                    Some(t) => t,
+                                    None => continue,
+                                },
                             };
                             src_over_u8(px, lut[(t * 255. + 0.5) as usize], c);
                         }
@@ -759,18 +787,41 @@ impl Shader<'_> {
         if !t.is_finite() {
             return None;
         }
-        Some(match extend {
-            Extend::Repeat => t - t.floor(),
-            Extend::Reflect => {
-                let m = t.rem_euclid(2.);
-                if m > 1. {
-                    2. - m
-                } else {
-                    m
-                }
+        Some(extend_t(*extend, t))
+    }
+
+    /// For a linear gradient, `t` at the pixel center (`x`, `y`) before the
+    /// extend mode and its change per pixel along the row.
+    fn linear_row(&self, x: f32, y: f32) -> Option<(f32, f32, Extend)> {
+        let Shader::Gradient {
+            inverse,
+            kind: Kind::Linear { p0, d, inv_dd },
+            extend,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let (fx, fy) = inverse.transform(x, y);
+        let t = ((fx - p0.x) * d.x + (fy - p0.y) * d.y) * inv_dd;
+        let dt = (inverse.xx * d.x + inverse.yx * d.y) * inv_dd;
+        (t.is_finite() && dt.is_finite()).then_some((t, dt, *extend))
+    }
+}
+
+/// Applies the extend mode to a position along the color line.
+fn extend_t(extend: Extend, t: f32) -> f32 {
+    match extend {
+        Extend::Repeat => t - t.floor(),
+        Extend::Reflect => {
+            let m = t.rem_euclid(2.);
+            if m > 1. {
+                2. - m
+            } else {
+                m
             }
-            _ => t.clamp(0., 1.),
-        })
+        }
+        _ => t.clamp(0., 1.),
     }
 }
 
