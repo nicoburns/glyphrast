@@ -37,6 +37,10 @@
 //! .render(&mut scaler, glyph_id);
 //! # }
 //! ```
+//!
+//! [`Render::format`] selects the mask format: [`Format::Alpha`], zeno's
+//! unfiltered [`Format::Subpixel`], or [`Format::Lcd`], a single pass at
+//! three samples per pixel filtered with FreeType's LCD weights.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![warn(missing_docs)]
@@ -51,13 +55,14 @@ pub mod outline;
 mod bitmap;
 mod color;
 mod colr1;
+mod lcd;
 mod render;
 mod scaler_cache;
 mod strike;
 
 pub use read_fonts;
 pub use read_fonts::model::Font;
-pub use render::Render;
+pub use render::{Format, LcdFilter, Render, SubpixelOrder};
 pub use skrifa;
 pub use zeno;
 
