@@ -29,21 +29,79 @@ pub(crate) struct Scratch {
     /// Stack of `w * h * 4` premultiplied RGBA layers; the first is the output.
     layers: Vec<u8>,
     frames: Vec<Frame>,
-    /// Stack of `w * h` coverage masks, each already intersected with the
-    /// clips below it.
+    /// Arena of clip masks, each already intersected with the clips below it.
     clips: Vec<u8>,
-    clip_count: usize,
+    clip_stack: Vec<Clip>,
     /// Transform stack in font units.
     transforms: Vec<Matrix<f32>>,
-    /// Coverage of the shape most recently rasterized.
+    /// Coverage of the shape most recently rasterized, at its own bounds.
     coverage: Vec<u8>,
+    coverage_rect: Rect,
     stops: Vec<Stop>,
 }
 
 struct Frame {
     mode: CompositeMode,
     /// Clip stack depth when the layer was pushed.
-    clip: usize,
+    clip_depth: usize,
+    /// Pixels the layer has been drawn into.
+    dirty: Rect,
+}
+
+/// A clip mask: `rect.w * rect.h` bytes at `offset` in the clip arena.
+#[derive(Copy, Clone)]
+struct Clip {
+    rect: Rect,
+    offset: usize,
+}
+
+/// A rectangle of canvas pixels; row 0 is the top row.
+#[derive(Copy, Clone, Default, PartialEq, Debug)]
+struct Rect {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+impl Rect {
+    fn intersect(self, other: Rect) -> Rect {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let w = (self.x + self.w).min(other.x + other.w) - x;
+        let h = (self.y + self.h).min(other.y + other.h) - y;
+        if w <= 0 || h <= 0 {
+            Rect::default()
+        } else {
+            Rect { x, y, w, h }
+        }
+    }
+
+    fn union(self, other: Rect) -> Rect {
+        if self.is_empty() {
+            return other;
+        }
+        if other.is_empty() {
+            return self;
+        }
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        Rect {
+            x,
+            y,
+            w: (self.x + self.w).max(other.x + other.w) - x,
+            h: (self.y + self.h).max(other.y + other.h) - y,
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        self.w <= 0 || self.h <= 0
+    }
+
+    /// Index of canvas pixel (`x`, `y`) in a buffer covering this rectangle.
+    fn index(self, x: i32, y: i32) -> usize {
+        ((y - self.y) * self.w + (x - self.x)) as usize
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -164,7 +222,7 @@ impl<'a> Painter<'a> {
         scratch.layers.resize(n * 4, 0);
         scratch.frames.clear();
         scratch.clips.clear();
-        scratch.clip_count = 0;
+        scratch.clip_stack.clear();
         scratch.transforms.clear();
         scratch.transforms.push(Matrix::IDENTITY);
 
@@ -201,19 +259,33 @@ impl<'a> Painter<'a> {
         self.width * self.height
     }
 
-    /// Rasterizes `path`, already in pixels, into the coverage buffer.
+    fn canvas(&self) -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            w: self.width as i32,
+            h: self.height as i32,
+        }
+    }
+
+    /// The innermost clip, if any, with its mask.
+    fn clip(&self) -> Option<(Rect, &[u8])> {
+        let scratch = &*self.buffers.scratch;
+        let clip = scratch.clip_stack.last()?;
+        Some((clip.rect, &scratch.clips[clip.offset..]))
+    }
+
+    /// Rasterizes `path`, already in pixels, into the coverage buffer at the
+    /// path's own bounds.
     fn rasterize(&mut self, path: impl PathData) {
         let scratch = &mut *self.buffers.scratch;
-        scratch.coverage.clear();
-        scratch.coverage.resize(self.width * self.height, 0);
-        if self.width == 0 || self.height == 0 {
-            return;
-        }
-        Mask::with_scratch(path, self.buffers.rcx)
-            .size(self.width as u32, self.height as u32)
-            .origin(Origin::BottomLeft)
-            .offset(Vector::new(-(self.x0 as f32), -(self.y0 as f32)))
-            .render_into(&mut scratch.coverage[..], None);
+        scratch.coverage_rect = rasterize(
+            path,
+            self.buffers.rcx,
+            &mut scratch.coverage,
+            Vector::new(-(self.x0 as f32), -(self.y0 as f32)),
+            self.height,
+        );
     }
 
     /// Rasterizes the outline of `glyph` under the current transform.
@@ -239,76 +311,102 @@ impl<'a> Painter<'a> {
         let outline = &mut *self.buffers.outline;
         outline.transform(&to_zeno(m));
         let scratch = &mut *self.buffers.scratch;
-        scratch.coverage.clear();
-        scratch.coverage.resize(self.width * self.height, 0);
-        if self.width == 0 || self.height == 0 {
-            return;
-        }
-        Mask::with_scratch(outline.path(), self.buffers.rcx)
-            .size(self.width as u32, self.height as u32)
-            .origin(Origin::BottomLeft)
-            .offset(Vector::new(-(self.x0 as f32), -(self.y0 as f32)))
-            .render_into(&mut scratch.coverage[..], None);
+        scratch.coverage_rect = rasterize(
+            outline.path(),
+            self.buffers.rcx,
+            &mut scratch.coverage,
+            Vector::new(-(self.x0 as f32), -(self.y0 as f32)),
+            self.height,
+        );
     }
 
     /// Pushes the coverage buffer, intersected with the current clip.
     fn push_clip(&mut self) {
-        let n = self.pixels();
+        let rect = match self.clip() {
+            Some((clip, _)) => clip,
+            None => self.canvas(),
+        }
+        .intersect(self.buffers.scratch.coverage_rect)
+        .intersect(self.canvas());
         let scratch = &mut *self.buffers.scratch;
-        let depth = scratch.clip_count;
-        scratch.clips.resize((depth + 1) * n, 0);
-        let (below, top) = scratch.clips.split_at_mut(depth * n);
-        if depth == 0 {
-            top.copy_from_slice(&scratch.coverage[..n]);
-        } else {
-            let prev = &below[(depth - 1) * n..];
-            for ((t, &p), &c) in top.iter_mut().zip(prev).zip(&scratch.coverage) {
-                *t = mul255(p, c);
+        let offset = scratch.clips.len();
+        scratch.clips.resize(offset + (rect.w * rect.h) as usize, 0);
+        let (below, top) = scratch.clips.split_at_mut(offset);
+        let prev = scratch
+            .clip_stack
+            .last()
+            .map(|c| (c.rect, &below[c.offset..]));
+        let coverage = (scratch.coverage_rect, &scratch.coverage[..]);
+        for y in rect.y..rect.y + rect.h {
+            for x in rect.x..rect.x + rect.w {
+                let mut c = coverage.1[coverage.0.index(x, y)];
+                if let Some((prev_rect, prev)) = prev {
+                    c = mul255(c, prev[prev_rect.index(x, y)]);
+                }
+                top[rect.index(x, y)] = c;
             }
         }
-        scratch.clip_count = depth + 1;
+        scratch.clip_stack.push(Clip { rect, offset });
     }
 
     /// Fills the top layer through the current clip, and through the
     /// coverage buffer as well when `with_coverage` is set.
     fn fill_masked(&mut self, brush: Brush<'_>, with_coverage: bool) {
-        let n = self.pixels();
-        if n == 0 {
+        let mut rect = match self.clip() {
+            Some((clip, _)) => clip,
+            None => self.canvas(),
+        }
+        .intersect(self.canvas());
+        if with_coverage {
+            rect = rect.intersect(self.buffers.scratch.coverage_rect);
+        }
+        if rect.is_empty() {
             return;
+        }
+        if let Some(frame) = self.buffers.scratch.frames.last_mut() {
+            frame.dirty = frame.dirty.union(rect);
         }
         let mut stops = core::mem::take(&mut self.buffers.scratch.stops);
         let shader = self.shader(brush, &mut stops);
         if let Some(shader) = shader {
+            let lut = match &shader {
+                Shader::Gradient { stops, .. } => Some(gradient_lut(stops)),
+                Shader::Solid(_) => None,
+            };
+            let n = self.pixels();
             let scratch = &mut *self.buffers.scratch;
-            let clip = (scratch.clip_count > 0)
-                .then(|| &scratch.clips[(scratch.clip_count - 1) * n..][..n]);
-            let coverage = with_coverage.then(|| &scratch.coverage[..n]);
+            let clip = scratch
+                .clip_stack
+                .last()
+                .map(|c| (c.rect, &scratch.clips[c.offset..]));
+            let coverage = with_coverage.then(|| (scratch.coverage_rect, &scratch.coverage[..]));
             let len = scratch.layers.len();
             let layer = &mut scratch.layers[len - n * 4..];
             let (width, x0) = (self.width, self.x0 as f32);
             let top = (self.y0 + self.height as i32) as f32;
-            for (y, row) in layer.chunks_exact_mut(width * 4).enumerate() {
+            for y in rect.y..rect.y + rect.h {
                 let py = top - y as f32 - 0.5;
-                for (x, px) in row.chunks_exact_mut(4).enumerate() {
-                    let i = y * width + x;
-                    let mut c = clip.map_or(255, |clip| clip[i]);
-                    if let Some(coverage) = coverage {
-                        c = mul255(c, coverage[i]);
+                let row =
+                    &mut layer[(y as usize * width + rect.x as usize) * 4..][..rect.w as usize * 4];
+                for (i, px) in row.chunks_exact_mut(4).enumerate() {
+                    let x = rect.x + i as i32;
+                    let mut c = clip.map_or(255, |(r, m)| m[r.index(x, y)]);
+                    if let Some((r, m)) = coverage {
+                        c = mul255(c, m[r.index(x, y)]);
                     }
                     if c == 0 {
                         continue;
                     }
-                    let Some(mut color) = shader.at(x0 + x as f32 + 0.5, py) else {
-                        continue;
-                    };
-                    if c != 255 {
-                        let k = c as f32 / 255.;
-                        for v in &mut color {
-                            *v *= k;
+                    match (&shader, &lut) {
+                        (Shader::Solid(color), _) => src_over_u8(px, *color, c),
+                        (shader, Some(lut)) => {
+                            let Some(t) = shader.t(x0 + x as f32 + 0.5, py) else {
+                                continue;
+                            };
+                            src_over_u8(px, lut[(t * 255. + 0.5) as usize], c);
                         }
+                        (Shader::Gradient { .. }, None) => unreachable!(),
                     }
-                    let dst = unpack(px);
-                    pack(px, src_over(color, dst));
                 }
             }
         }
@@ -343,7 +441,11 @@ impl<'a> Painter<'a> {
             Brush::Solid {
                 palette_index,
                 alpha,
-            } => Shader::Solid(premultiply(self.color(palette_index, alpha))),
+            } => {
+                let mut color = [0; 4];
+                pack(&mut color, premultiply(self.color(palette_index, alpha)));
+                Shader::Solid(color)
+            }
             Brush::LinearGradient {
                 p0,
                 p1,
@@ -411,6 +513,30 @@ impl<'a> Painter<'a> {
     }
 }
 
+/// Rasterizes `path` at its own bounds, shifted by `offset` into canvas
+/// space, and returns the rectangle it covers (row 0 at the canvas top).
+fn rasterize(
+    path: impl PathData,
+    rcx: &mut zeno::Scratch,
+    coverage: &mut Vec<u8>,
+    offset: Vector,
+    canvas_height: usize,
+) -> Rect {
+    coverage.clear();
+    let placement = Mask::with_scratch(path, rcx)
+        .origin(Origin::BottomLeft)
+        .offset(offset)
+        .render_offset(offset)
+        .inspect(|_, w, h| coverage.resize((w * h) as usize, 0))
+        .render_into(&mut coverage[..], None);
+    Rect {
+        x: placement.left,
+        y: canvas_height as i32 - placement.top,
+        w: placement.width as i32,
+        h: placement.height as i32,
+    }
+}
+
 impl PaintSink for Painter<'_> {
     fn push_transform(&mut self, transform: Matrix<f32>) {
         let m = self.ctm() * transform;
@@ -447,11 +573,9 @@ impl PaintSink for Painter<'_> {
     }
 
     fn pop_clip(&mut self) {
-        let n = self.pixels();
         let scratch = &mut *self.buffers.scratch;
-        if scratch.clip_count > 0 {
-            scratch.clip_count -= 1;
-            scratch.clips.truncate(scratch.clip_count * n);
+        if let Some(clip) = scratch.clip_stack.pop() {
+            scratch.clips.truncate(clip.offset);
         }
     }
 
@@ -480,7 +604,8 @@ impl PaintSink for Painter<'_> {
         let scratch = &mut *self.buffers.scratch;
         scratch.frames.push(Frame {
             mode: composite_mode,
-            clip: scratch.clip_count,
+            clip_depth: scratch.clip_stack.len(),
+            dirty: Rect::default(),
         });
         let len = scratch.layers.len();
         scratch.layers.resize(len + n * 4, 0);
@@ -488,6 +613,8 @@ impl PaintSink for Painter<'_> {
 
     fn pop_layer(&mut self) {
         let n = self.pixels();
+        let canvas = self.canvas();
+        let width = self.width;
         let scratch = &mut *self.buffers.scratch;
         let Some(frame) = scratch.frames.pop() else {
             return;
@@ -495,26 +622,62 @@ impl PaintSink for Painter<'_> {
         let len = scratch.layers.len();
         let (below, top) = scratch.layers.split_at_mut(len - n * 4);
         let below = &mut below[len - 2 * n * 4..];
-        let depth = frame.clip.min(scratch.clip_count);
-        let clip = (depth > 0).then(|| &scratch.clips[(depth - 1) * n..][..n]);
-        for (i, (dst, src)) in below
-            .chunks_exact_mut(4)
-            .zip(top.chunks_exact(4))
-            .enumerate()
-        {
-            let c = clip.map_or(255, |clip| clip[i]);
-            if c == 0 {
-                continue;
-            }
-            let (s, d) = (unpack(src), unpack(dst));
-            let mut out = composite(frame.mode, s, d);
-            if c != 255 {
-                let k = c as f32 / 255.;
-                for (o, d) in out.iter_mut().zip(d) {
-                    *o = d + (*o - d) * k;
+        let clip = frame
+            .clip_depth
+            .checked_sub(1)
+            .and_then(|i| scratch.clip_stack.get(i))
+            .map(|c| (c.rect, &scratch.clips[c.offset..]));
+        let mut rect = clip.map_or(canvas, |(r, _)| r).intersect(canvas);
+        // Where the source is transparent these modes leave the destination
+        // alone, so only the pixels drawn into the layer need compositing.
+        let sparse = !matches!(
+            frame.mode,
+            CompositeMode::Clear
+                | CompositeMode::Src
+                | CompositeMode::SrcIn
+                | CompositeMode::DestIn
+                | CompositeMode::SrcOut
+                | CompositeMode::DestAtop
+        );
+        if sparse {
+            rect = rect.intersect(frame.dirty);
+        }
+        let src_over_mode = matches!(frame.mode, CompositeMode::SrcOver | CompositeMode::Unknown);
+        for y in rect.y..rect.y + rect.h {
+            let start = (y as usize * width + rect.x as usize) * 4;
+            let span = rect.w as usize * 4;
+            let dst_row = &mut below[start..start + span];
+            let src_row = &top[start..start + span];
+            for (i, (dst, src)) in dst_row
+                .chunks_exact_mut(4)
+                .zip(src_row.chunks_exact(4))
+                .enumerate()
+            {
+                if sparse && src[3] == 0 {
+                    continue;
                 }
+                let x = rect.x + i as i32;
+                let c = clip.map_or(255, |(r, m)| m[r.index(x, y)]);
+                if c == 0 {
+                    continue;
+                }
+                if src_over_mode {
+                    src_over_u8(dst, [src[0], src[1], src[2], src[3]], c);
+                    continue;
+                }
+                let (s, d) = (unpack(src), unpack(dst));
+                let mut out = composite(frame.mode, s, d);
+                if c != 255 {
+                    let k = c as f32 / 255.;
+                    for (o, d) in out.iter_mut().zip(d) {
+                        *o = d + (*o - d) * k;
+                    }
+                }
+                pack(dst, out);
             }
-            pack(dst, out);
+        }
+        if let Some(parent) = scratch.frames.last_mut() {
+            parent.dirty = parent.dirty.union(rect);
         }
         scratch.layers.truncate(len - n * 4);
     }
@@ -522,7 +685,8 @@ impl PaintSink for Painter<'_> {
 
 enum Shader<'s> {
     /// Premultiplied.
-    Solid([f32; 4]),
+    Solid([u8; 4]),
+
     Gradient {
         /// Pixels to the gradient's font-unit space.
         inverse: Matrix<f32>,
@@ -554,64 +718,69 @@ enum Kind {
 }
 
 impl Shader<'_> {
-    /// Premultiplied color at a pixel center, or `None` where the brush
-    /// paints nothing.
-    fn at(&self, x: f32, y: f32) -> Option<[f32; 4]> {
-        match self {
-            Shader::Solid(color) => Some(*color),
-            Shader::Gradient {
-                inverse,
-                kind,
-                extend,
-                stops,
-            } => {
-                let (x, y) = inverse.transform(x, y);
-                let t = match *kind {
-                    Kind::Linear { p0, d, inv_dd } => {
-                        ((x - p0.x) * d.x + (y - p0.y) * d.y) * inv_dd
-                    }
-                    Kind::Radial { c0, r0, cd, dr } => radial_t(x - c0.x, y - c0.y, r0, cd, dr)?,
-                    Kind::Sweep { c0, start, sweep } => {
-                        // Counter-clockwise from +x in the font's y-up space,
-                        // then into the clockwise range read-fonts uses.
-                        let mut degrees = (y - c0.y).atan2(x - c0.x).to_degrees();
-                        if degrees < 0. {
-                            degrees += 360.;
-                        }
-                        let mut clockwise = 360. - degrees;
-                        if clockwise >= 360. {
-                            clockwise -= 360.;
-                        }
-                        if sweep == 0. {
-                            if clockwise < start {
-                                0.
-                            } else {
-                                1.
-                            }
-                        } else {
-                            (clockwise - start) / sweep
-                        }
-                    }
-                };
-                if !t.is_finite() {
-                    return None;
+    /// Position along the color line at a pixel center, after the extend
+    /// mode, or `None` where the brush paints nothing.
+    fn t(&self, x: f32, y: f32) -> Option<f32> {
+        let Shader::Gradient {
+            inverse,
+            kind,
+            extend,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let (x, y) = inverse.transform(x, y);
+        let t = match *kind {
+            Kind::Linear { p0, d, inv_dd } => ((x - p0.x) * d.x + (y - p0.y) * d.y) * inv_dd,
+            Kind::Radial { c0, r0, cd, dr } => radial_t(x - c0.x, y - c0.y, r0, cd, dr)?,
+            Kind::Sweep { c0, start, sweep } => {
+                // Counter-clockwise from +x in the font's y-up space,
+                // then into the clockwise range read-fonts uses.
+                let mut degrees = (y - c0.y).atan2(x - c0.x).to_degrees();
+                if degrees < 0. {
+                    degrees += 360.;
                 }
-                let t = match extend {
-                    Extend::Repeat => t - t.floor(),
-                    Extend::Reflect => {
-                        let m = t.rem_euclid(2.);
-                        if m > 1. {
-                            2. - m
-                        } else {
-                            m
-                        }
+                let mut clockwise = 360. - degrees;
+                if clockwise >= 360. {
+                    clockwise -= 360.;
+                }
+                if sweep == 0. {
+                    if clockwise < start {
+                        0.
+                    } else {
+                        1.
                     }
-                    _ => t.clamp(0., 1.),
-                };
-                Some(premultiply(color_at(stops, t)))
+                } else {
+                    (clockwise - start) / sweep
+                }
             }
+        };
+        if !t.is_finite() {
+            return None;
         }
+        Some(match extend {
+            Extend::Repeat => t - t.floor(),
+            Extend::Reflect => {
+                let m = t.rem_euclid(2.);
+                if m > 1. {
+                    2. - m
+                } else {
+                    m
+                }
+            }
+            _ => t.clamp(0., 1.),
+        })
     }
+}
+
+/// Premultiplied colors sampled along the color line at 256 positions.
+fn gradient_lut(stops: &[Stop]) -> [[u8; 4]; 256] {
+    let mut lut = [[0; 4]; 256];
+    for (i, entry) in lut.iter_mut().enumerate() {
+        pack(entry, premultiply(color_at(stops, i as f32 / 255.)));
+    }
+    lut
 }
 
 /// Largest `t` whose circle, interpolated between the two of a radial
@@ -690,6 +859,19 @@ fn pack(px: &mut [u8], c: [f32; 4]) {
 
 fn mul255(a: u8, b: u8) -> u8 {
     ((a as u32 * b as u32 + 127) / 255) as u8
+}
+
+/// Source-over of premultiplied `color` scaled by coverage `c` onto `dst`.
+fn src_over_u8(dst: &mut [u8], color: [u8; 4], c: u8) {
+    let s = if c == 255 {
+        color
+    } else {
+        color.map(|v| mul255(v, c))
+    };
+    let k = 255 - s[3];
+    for (d, s) in dst.iter_mut().zip(s) {
+        *d = s + mul255(*d, k);
+    }
 }
 
 fn src_over(s: [f32; 4], d: [f32; 4]) -> [f32; 4] {
