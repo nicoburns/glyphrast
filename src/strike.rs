@@ -120,13 +120,17 @@ impl<'a> Bitmap<'a> {
                 if super::bitmap::decode_png(png, scratch, dst).is_none() {
                     return false;
                 }
+                super::bitmap::premultiply(dst);
             }
             Pixels::Bgra(bgra) => {
+                // Stored premultiplied in BGRA order.
                 let src = bgra.data();
                 if src.len() < size {
                     return false;
                 }
-                dst.copy_from_slice(&src[..size]);
+                for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                    d.copy_from_slice(&[s[2], s[1], s[0], s[3]]);
+                }
             }
             Pixels::Mask(mask) => {
                 let src = mask.data();

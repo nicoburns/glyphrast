@@ -74,11 +74,47 @@ fn same_image(a: &Option<swash::scale::image::Image>, b: &Option<Image>) -> bool
         (None, None) => true,
         (Some(a), Some(b)) => {
             format!("{:?}", a.placement) == format!("{:?}", b.placement)
-                && a.data == b.data
                 && format!("{:?}", a.content) == format!("{:?}", b.content)
+                && if matches!(a.content, swash::scale::image::Content::Color) {
+                    same_color_data(&a.data, &b.data)
+                } else {
+                    a.data == b.data
+                }
         }
         _ => false,
     }
+}
+
+/// `Content::Color` is premultiplied here and straight alpha in swash (raw
+/// 32-bit CBDT data is swizzled from BGRA). Alpha must agree exactly; colour
+/// must agree with swash's colour premultiplied, within rounding of the
+/// resampler and the layer blend.
+fn same_color_data(swash: &[u8], new: &[u8]) -> bool {
+    if swash.len() != new.len() {
+        return false;
+    }
+    // COLRv0 compositing was already premultiplied in swash.
+    if swash == new {
+        return true;
+    }
+    let swizzled = swash
+        .chunks_exact(4)
+        .zip(new.chunks_exact(4))
+        .all(|(s, n)| n == [s[2], s[1], s[0], s[3]]);
+    if swizzled {
+        return true;
+    }
+    swash
+        .chunks_exact(4)
+        .zip(new.chunks_exact(4))
+        .all(|(s, n)| {
+            let a = s[3] as i32;
+            n[3] as i32 == a
+                && (0..3).all(|i| {
+                    let expected = (s[i] as i32 * a + 127) / 255;
+                    (n[i] as i32 - expected).abs() <= 3
+                })
+        })
 }
 
 fn describe(a: &Option<swash::scale::image::Image>, b: &Option<Image>) -> String {

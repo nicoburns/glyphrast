@@ -64,6 +64,22 @@ pub fn decode_png(_data: &[u8], _scratch: &mut Vec<u8>, _target: &mut [u8]) -> O
     None
 }
 
+/// Converts straight-alpha RGBA pixels to premultiplied alpha in place.
+pub fn premultiply(rgba: &mut [u8]) {
+    for px in rgba.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        if a == 255 {
+            continue;
+        }
+        for c in &mut px[..3] {
+            *c = ((*c as u32 * a + 127) / 255) as u8;
+        }
+    }
+}
+
+/// Composites an 8-bit mask, tinted with the straight-alpha `color`, over a
+/// premultiplied RGBA target at (`x`, `y`) with source-over (the target starts
+/// transparent, so the result is premultiplied).
 pub fn blit(
     mask: &[u8],
     mask_width: u32,
@@ -377,21 +393,16 @@ fn sample_dir<Input, Output, Filter>(
         let isum = 1. / sum;
         let weights = &weights[..num_weights];
         for y in 0..height {
+            // Pixels are premultiplied, so every channel is a plain weighted average.
             let mut accum = [0f32; 4];
             for (i, w) in weights.iter().enumerate() {
                 let p = input((left + i) as u32, y);
-                let a = p[3];
-                accum[0] += p[0] * w * a;
-                accum[1] += p[1] * w * a;
-                accum[2] += p[2] * w * a;
-                accum[3] += p[3] * w;
+                for (acc, v) in accum.iter_mut().zip(p) {
+                    *acc += v * w;
+                }
             }
-            if accum[3] != 0. {
-                let a = 1. / accum[3];
-                accum[0] *= a;
-                accum[1] *= a;
-                accum[2] *= a;
-                accum[3] *= isum;
+            for acc in &mut accum {
+                *acc *= isum;
             }
             output(outx, y, &accum);
         }

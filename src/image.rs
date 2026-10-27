@@ -12,10 +12,7 @@ pub enum Content {
     Mask,
     /// 32-bit RGBA subpixel mask.
     SubpixelMask,
-    /// 32-bit RGBA bitmap.
-    ///
-    /// Alpha is straight (not premultiplied) for PNG and COLRv0 sources;
-    /// 32-bit CBDT data is passed through as stored in the font.
+    /// 32-bit RGBA bitmap with premultiplied alpha, in sRGB.
     Color,
 }
 

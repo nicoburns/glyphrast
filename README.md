@@ -33,6 +33,9 @@ let image = Render::new(&[
 - `Scaler::scale_outline_into` returns the hinted advance and bearing instead of `bool`.
 - A glyph whose embedded bitmap record is empty yields no bitmap; swash decoded the next glyph's
   image for it.
+- `Content::Color` data is premultiplied RGBA. swash returned straight alpha for PNG bitmaps and
+  passed raw 32-bit CBDT data through in BGRA order (its COLRv0 compositing was already
+  premultiplied).
 
 Everything else, including swash's hinting configuration and its bitmap and COLRv0 compositing,
 reproduces swash's output byte for byte (see `tests/golden.rs`, which compares against swash
